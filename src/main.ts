@@ -62,7 +62,16 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
 
   const input = new Input(canvas, {
     onTab: () => world.tabTarget(),
-    onAbility: (slot) => world.castAbilityBySlot(slot),
+    // slot 0 (key 1) is Attack for every class — auto-attack without needing
+    // right-click; the remaining keys map onto the class kit shifted by one
+    onAbility: (slot) => {
+      if (slot === 0) {
+        if (world.player.autoAttack) world.stopAutoAttack();
+        else world.startAutoAttack();
+      } else {
+        world.castAbilityBySlot(slot - 1);
+      }
+    },
     onUiKey: (key) => {
       switch (key) {
         case 'interact': interactKey(); break;
@@ -146,6 +155,34 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
   let last = performance.now();
   let acc = 0;
 
+  // Camera follow state: keyboard turning advances facing in 20Hz sim steps,
+  // so the camera tracks the player's render-interpolated facing per frame
+  // (same curve the character model follows) instead of the raw tick deltas —
+  // that's what killed the turn stutter. While running, the orbit offset
+  // eases back to zero so the camera settles in behind the character.
+  let lastInterpFacing: number | null = null;
+  const CAM_SETTLE_RATE = 3; // 1/s exponential ease
+
+  function wrapAngle(d: number): number {
+    while (d > Math.PI) d -= 2 * Math.PI;
+    while (d < -Math.PI) d += 2 * Math.PI;
+    return d;
+  }
+
+  function updateCamera(frameDt: number, interpFacing: number): void {
+    if (!input.rightDown) {
+      // follow turns 1:1 (keeps any manual orbit offset constant)
+      if (lastInterpFacing !== null) input.camYaw += wrapAngle(interpFacing - lastInterpFacing);
+      // settle behind the character while moving, unless the player is
+      // actively holding an orbit drag
+      const mi = input.readMoveInput();
+      if ((mi.forward || mi.strafeLeft || mi.strafeRight) && !input.leftDown) {
+        input.camYaw += wrapAngle(interpFacing - input.camYaw) * (1 - Math.exp(-frameDt * CAM_SETTLE_RATE));
+      }
+    }
+    lastInterpFacing = interpFacing; // track through mouselook too — no snap on release
+  }
+
   function frame(now: number): void {
     requestAnimationFrame(frame);
     let frameDt = (now - last) / 1000;
@@ -159,18 +196,13 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
       while (acc >= DT) {
         const mi = input.readMoveInput();
         Object.assign(offlineSim.moveInput, mi);
-        const facingBefore = offlineSim.player.facing;
         if (mouselook) offlineSim.player.facing = input.camYaw;
         const events = offlineSim.tick();
-        if (!input.rightDown) {
-          let d = offlineSim.player.facing - facingBefore;
-          while (d > Math.PI) d -= 2 * Math.PI;
-          while (d < -Math.PI) d += 2 * Math.PI;
-          input.camYaw += d;
-        }
         hud.handleEvents(events);
         acc -= DT;
       }
+      const pp = offlineSim.player;
+      updateCamera(frameDt, pp.prevFacing + wrapAngle(pp.facing - pp.prevFacing) * (acc / DT));
       renderer.camYaw = input.camYaw;
       renderer.camPitch = input.camPitch;
       renderer.camDist = input.camDist;
@@ -183,14 +215,14 @@ async function startGame(world: IWorld, offlineSim: Sim | null, online: ClientWo
     const net = online!;
     Object.assign(net.moveInput, input.readMoveInput());
     net.setMouselookFacing(mouselook ? input.camYaw : null);
-    if (!input.rightDown && net.pendingFacingDelta !== 0) {
-      input.camYaw += net.pendingFacingDelta;
-      net.pendingFacingDelta = 0;
-    }
+    net.pendingFacingDelta = 0; // superseded by the interpolated follow below
     hud.handleEvents(net.drainEvents());
     const alpha = net.lastSnapAt > 0
       ? Math.min(1.25, (performance.now() - net.lastSnapAt) / Math.max(20, net.snapInterval))
       : 1;
+    const pe = world.player;
+    // facing interp capped at 1 — extrapolating angles past the snapshot oscillates
+    updateCamera(frameDt, pe.prevFacing + wrapAngle(pe.facing - pe.prevFacing) * Math.min(1, alpha));
     renderer.camYaw = input.camYaw;
     renderer.camPitch = input.camPitch;
     renderer.camDist = input.camDist;

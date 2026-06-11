@@ -213,12 +213,22 @@ export class Hud {
       cdText.className = 'cdtext';
       btn.append(label, kb, cdOverlay, cdText);
       const slot = i;
+      // slot 0 is Attack for every class (auto-attack toggle — players
+      // without right-click need a way in); the kit fills slots 1+
       btn.addEventListener('click', () => {
         audio.click();
-        this.sim.castAbilityBySlot(slot);
+        if (slot === 0) {
+          if (this.sim.player.autoAttack) this.sim.stopAutoAttack();
+          else this.sim.startAutoAttack();
+        } else {
+          this.sim.castAbilityBySlot(slot - 1);
+        }
       });
       this.attachTooltip(btn, () => {
-        const known = this.sim.known[slot];
+        if (slot === 0) {
+          return '<div class="tt-title">Attack</div><div class="tt-sub">Toggle auto-attack on your target.<br>Right-clicking an enemy also attacks.</div>';
+        }
+        const known = this.sim.known[slot - 1];
         return known ? this.abilityTooltip(known) : '<div class="tt-sub">Empty slot</div>';
       });
       bar.appendChild(btn);
@@ -318,7 +328,20 @@ export class Hud {
     const tgtDist = target && !target.dead ? dist2d(p.pos, target.pos) : null;
     for (let i = 0; i < this.abilityButtons.length; i++) {
       const ab = this.abilityButtons[i];
-      const known = sim.known[i];
+      if (i === 0) {
+        // Attack button: glows while auto-attacking, red-edged out of range
+        ab.btn.classList.remove('empty', 'unusable');
+        if (ab.lastIcon !== '__attack') {
+          ab.lastIcon = '__attack';
+          ab.label.style.backgroundImage = `url(${iconDataUrl('ability', 'attack')})`;
+        }
+        ab.cdOverlay.style.height = '0%';
+        ab.cdText.textContent = '';
+        ab.btn.classList.toggle('queued', !!p.autoAttack);
+        ab.btn.classList.toggle('oor', tgtDist !== null && tgtDist > MELEE_RANGE);
+        continue;
+      }
+      const known = sim.known[i - 1];
       if (!known) {
         ab.btn.classList.add('empty');
         if (ab.lastIcon !== '') {
